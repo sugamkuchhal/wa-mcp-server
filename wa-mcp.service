@@ -1,0 +1,18 @@
+[Unit]
+Description=WhatsApp MCP server (Baileys)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/wa-mcp-server
+EnvironmentFile=/home/ubuntu/wa-mcp-server/.env
+ExecStart=/usr/bin/node /home/ubuntu/wa-mcp-server/index.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/home/ubuntu/wa-mcp-server/wa-mcp.log
+StandardError=append:/home/ubuntu/wa-mcp-server/wa-mcp.log
+
+[Install]
+WantedBy=multi-user.target
