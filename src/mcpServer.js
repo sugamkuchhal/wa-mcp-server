@@ -132,10 +132,20 @@ function buildHttpApp(wa, store) {
     throw new Error('WA_MCP_TOKEN env var is required (used as the bearer token remote clients must send)');
   }
 
+  // Accepts the token either as a standard Bearer header (for direct/manual
+  // testing) or as a ?token= query param. The query-param path exists
+  // because some MCP client bridges (e.g. mcp-remote) treat ANY 401 from a
+  // streamable-HTTP server as "this server requires OAuth" and fall into a
+  // whole OAuth discovery flow instead of just retrying with a static
+  // header. Embedding the token in the URL means the request is
+  // authenticated from the very first byte, so that fallback never
+  // triggers. /health is exempt so tunnels/monitors can hit it freely.
   app.use((req, res, next) => {
+    if (req.path === '/health') return next();
     const auth = req.headers.authorization || '';
-    const provided = auth.startsWith('Bearer ') ? auth.slice(7) : null;
-    if (provided !== token) {
+    const headerToken = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+    const queryToken = typeof req.query.token === 'string' ? req.query.token : null;
+    if (headerToken !== token && queryToken !== token) {
       return res.status(401).json({ error: 'unauthorized' });
     }
     next();
