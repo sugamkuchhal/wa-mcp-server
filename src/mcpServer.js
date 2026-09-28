@@ -155,23 +155,67 @@ function buildHttpApp(wa, store) {
     res.json({ ok: true, waStatus: wa.status });
   });
 
-  // One MCP server + transport per request, stateless-ish (new transport per
-  // session id via the SDK's own session handling). Simple single-endpoint
-  // setup, no SSE fallback needed since this is a personal, single-client
-  // deployment.
+  // Stateful streamable-HTTP session handling. A client's first POST is an
+  // `initialize` request with no mcp-session-id header; the SDK assigns a
+  // session id once that completes (onsessioninitialized), and every
+  // subsequent request (including the notifications/initialized message
+  // some clients, e.g. mcp-remote, send as a separate POST) must be routed
+  // to that SAME transport/server pair, not a fresh one — a new transport
+  // per request has no memory of the handshake and rejects follow-ups as
+  // "not initialized". GET is used by the SDK for the server->client SSE
+  // stream, DELETE for clean session teardown.
+  const sessions = new Map(); // sessionId -> { server, transport }
+
   app.post('/mcp', async (req, res) => {
     try {
-      const server = buildMcpServer(wa, store);
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID() });
-      res.on('close', () => {
-        transport.close();
-        server.close();
-      });
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
+      const existingSessionId = req.headers['mcp-session-id'];
+      let entry = existingSessionId ? sessions.get(existingSessionId) : undefined;
+
+      if (!entry) {
+        const server = buildMcpServer(wa, store);
+        const transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (sessionId) => {
+            sessions.set(sessionId, { server, transport });
+          },
+        });
+        transport.onclose = () => {
+          if (transport.sessionId) sessions.delete(transport.sessionId);
+        };
+        await server.connect(transport);
+        entry = { server, transport };
+      }
+
+      await entry.transport.handleRequest(req, res, req.body);
     } catch (err) {
       console.error('[mcp] request error:', err);
       if (!res.headersSent) res.status(500).json({ error: 'internal_error' });
+    }
+  });
+
+  app.get('/mcp', async (req, res) => {
+    const sessionId = req.headers['mcp-session-id'];
+    const entry = sessionId ? sessions.get(sessionId) : undefined;
+    if (!entry) return res.status(400).json({ error: 'unknown_or_missing_session' });
+    try {
+      await entry.transport.handleRequest(req, res);
+    } catch (err) {
+      console.error('[mcp] GET request error:', err);
+      if (!res.headersSent) res.status(500).json({ error: 'internal_error' });
+    }
+  });
+
+  app.delete('/mcp', async (req, res) => {
+    const sessionId = req.headers['mcp-session-id'];
+    const entry = sessionId ? sessions.get(sessionId) : undefined;
+    if (!entry) return res.status(400).json({ error: 'unknown_or_missing_session' });
+    try {
+      await entry.transport.handleRequest(req, res);
+    } catch (err) {
+      console.error('[mcp] DELETE request error:', err);
+      if (!res.headersSent) res.status(500).json({ error: 'internal_error' });
+    } finally {
+      sessions.delete(sessionId);
     }
   });
 
