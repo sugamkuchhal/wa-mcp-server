@@ -1,4 +1,5 @@
 'use strict';
+const fs = require('fs');
 const path = require('path');
 const pino = require('pino');
 const qrcode = require('qrcode-terminal');
@@ -121,6 +122,18 @@ class WhatsAppClient {
     if (!this.isConnected()) throw new Error('WhatsApp is not connected (status: ' + this.status + ')');
     const normalizedJid = normalizeJid(jid);
     return this.sock.sendMessage(normalizedJid, { text });
+  }
+
+  // Sends a file from disk as a WhatsApp document (preserves the original
+  // file name and type; `caption` is optional text shown with the file).
+  async sendDocument(jid, filePath, fileName, mimetype, caption) {
+    if (!this.isConnected()) throw new Error('WhatsApp is not connected (status: ' + this.status + ')');
+    if (!fs.existsSync(filePath)) throw new Error('Attachment file is missing on the server: ' + filePath);
+    const normalizedJid = normalizeJid(jid);
+    const buffer = fs.readFileSync(filePath);
+    const content = { document: buffer, fileName, mimetype };
+    if (caption) content.caption = caption;
+    return this.sock.sendMessage(normalizedJid, content);
   }
 }
 

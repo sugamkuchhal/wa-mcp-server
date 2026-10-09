@@ -1,17 +1,19 @@
 # wa-mcp-server
 
 Personal WhatsApp MCP server. Connects to WhatsApp via [Baileys](https://github.com/WhiskeySockets/Baileys)
-(no browser, no WhatsApp Business API), and exposes 7 tools over MCP:
+(no browser, no WhatsApp Business API), and exposes 8 tools over MCP:
 
 - `wa_debug` — connection status, self identity, counts, uptime
 - `wa_list_chats` — recent chats (individuals + groups)
 - `wa_search_contacts` — search known contacts by name
 - `wa_read_messages` — read recent messages from a chat
-- `wa_draft_message` — create a draft (does not send)
+- `wa_draft_message` — create a text draft (does not send)
+- `wa_draft_file` — create a file draft: a document (PDF, DOCX, XLSX, ...) passed as base64, max 10 MB, with an optional caption (does not send)
 - `wa_list_drafts` — list pending/sent drafts
-- `wa_send_draft` — send a previously created draft (the only tool that actually sends)
+- `wa_send_draft` — send a previously created draft, text or file (the only tool that actually sends)
 
 Every outgoing message goes through the draft → review → send flow. Nothing is sent silently.
+File drafts store their bytes under `data/attachments/` (gitignored).
 
 ## Setup on the VM
 

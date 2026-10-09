@@ -1,10 +1,36 @@
 'use strict';
+const path = require('path');
 const express = require('express');
 const { randomUUID } = require('crypto');
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 const { z } = require('zod');
 const { normalizeJid } = require('./whatsapp');
+
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10 MB
+
+const MIME_BY_EXT = {
+  '.pdf': 'application/pdf',
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.ppt': 'application/vnd.ms-powerpoint',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.csv': 'text/csv',
+  '.txt': 'text/plain',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.zip': 'application/zip',
+};
+
+// Strips any directory part and unsafe characters from a client-supplied file name.
+function sanitizeFileName(name) {
+  const base = path.basename(String(name).replace(/\\/g, '/'));
+  const cleaned = base.replace(/[^\w.\- ()]/g, '_').trim();
+  return cleaned || 'file';
+}
 
 /**
  * Builds the MCP server (tool definitions) and the Express app that serves
@@ -13,7 +39,7 @@ const { normalizeJid } = require('./whatsapp');
  * choke point that actually calls WhatsApp.
  */
 function buildMcpServer(wa, store) {
-  const server = new McpServer({ name: 'wa-mcp-server', version: '1.0.0' });
+  const server = new McpServer({ name: 'wa-mcp-server', version: '1.1.0' });
 
   server.tool(
     'wa_debug',
@@ -88,6 +114,51 @@ function buildMcpServer(wa, store) {
   );
 
   server.tool(
+    'wa_draft_file',
+    'Create a draft that sends a file (e.g. PDF, DOCX, XLSX) as a WhatsApp document to an individual or a group, with an optional caption. Does NOT send it — use wa_send_draft after the user reviews it. File content is passed as base64 (max 10 MB).',
+    {
+      to: z.string().min(1).describe('Recipient: phone number, contact jid, or group jid'),
+      file_name: z.string().min(1).describe('File name including extension, e.g. "JD - Data Scientist.docx"'),
+      content_base64: z.string().min(1).describe('The file bytes, base64-encoded'),
+      caption: z.string().optional().describe('Optional text shown with the file'),
+      mimetype: z.string().optional().describe('Optional MIME type; guessed from the file extension if omitted'),
+    },
+    async ({ to, file_name, content_base64, caption, mimetype }) => {
+      const safeName = sanitizeFileName(file_name);
+      const buffer = Buffer.from(content_base64, 'base64');
+      if (buffer.length === 0) {
+        return { content: [{ type: 'text', text: 'Attachment is empty (invalid or empty base64).' }], isError: true };
+      }
+      if (buffer.length > MAX_ATTACHMENT_BYTES) {
+        return {
+          content: [{ type: 'text', text: `Attachment is too large (${buffer.length} bytes; max ${MAX_ATTACHMENT_BYTES}).` }],
+          isError: true,
+        };
+      }
+      const mime = mimetype || MIME_BY_EXT[path.extname(safeName).toLowerCase()] || 'application/octet-stream';
+      const filePath = store.saveAttachment(safeName, buffer);
+      const draft = store.createDraft(to, caption || '', {
+        fileName: safeName,
+        mimetype: mime,
+        path: filePath,
+        size: buffer.length,
+      });
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `File draft created (id: ${draft.id}). Review it, then call wa_send_draft with this id to actually send.\n\n${JSON.stringify(
+              { id: draft.id, to: draft.to, caption: draft.text, fileName: safeName, mimetype: mime, size: buffer.length, status: draft.status },
+              null,
+              2
+            )}`,
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
     'wa_list_drafts',
     'List drafts. Defaults to pending (unsent) drafts.',
     { status: z.enum(['pending', 'sent', 'all']).optional().describe('Filter by status (default: pending)') },
@@ -100,8 +171,8 @@ function buildMcpServer(wa, store) {
 
   server.tool(
     'wa_send_draft',
-    'Send a previously created draft by id. This is the ONLY tool that actually sends a WhatsApp message — only call it after the message content has been explicitly approved.',
-    { draft_id: z.string().min(1).describe('The draft id returned by wa_draft_message') },
+    'Send a previously created draft by id (text message or file). This is the ONLY tool that actually sends a WhatsApp message — only call it after the message content has been explicitly approved.',
+    { draft_id: z.string().min(1).describe('The draft id returned by wa_draft_message or wa_draft_file') },
     async ({ draft_id }) => {
       const draft = store.getDraft(draft_id);
       if (!draft) {
@@ -111,7 +182,11 @@ function buildMcpServer(wa, store) {
         return { content: [{ type: 'text', text: `Draft ${draft_id} was already sent at ${new Date(draft.sentAt).toISOString()}` }] };
       }
       try {
-        await wa.sendText(draft.to, draft.text);
+        if (draft.attachment) {
+          await wa.sendDocument(draft.to, draft.attachment.path, draft.attachment.fileName, draft.attachment.mimetype, draft.text || undefined);
+        } else {
+          await wa.sendText(draft.to, draft.text);
+        }
         store.markDraftSent(draft_id);
         return { content: [{ type: 'text', text: `Sent draft ${draft_id} to ${draft.to}.` }] };
       } catch (err) {
@@ -125,7 +200,9 @@ function buildMcpServer(wa, store) {
 
 function buildHttpApp(wa, store) {
   const app = express();
-  app.use(express.json());
+  // File drafts carry base64 payloads (10 MB file ~ 13.4 MB base64), so the
+  // default 100kb JSON body limit is raised.
+  app.use(express.json({ limit: '20mb' }));
 
   const token = process.env.WA_MCP_TOKEN;
   if (!token) {

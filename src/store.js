@@ -8,8 +8,10 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { randomBytes } = require('crypto');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
+const ATTACHMENTS_DIR = path.join(DATA_DIR, 'attachments');
 const STORE_FILE = path.join(DATA_DIR, 'store.json');
 const MAX_MESSAGES_PER_CHAT = 100;
 const SAVE_INTERVAL_MS = 15000;
@@ -18,13 +20,17 @@ function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
+function ensureAttachmentsDir() {
+  if (!fs.existsSync(ATTACHMENTS_DIR)) fs.mkdirSync(ATTACHMENTS_DIR, { recursive: true });
+}
+
 class Store {
   constructor() {
     ensureDataDir();
     this.chats = new Map();       // jid -> { jid, name, isGroup, lastMessageAt }
     this.contacts = new Map();    // jid -> { jid, name, notify }
     this.messages = new Map();    // jid -> array of { id, fromMe, sender, text, timestamp }
-    this.drafts = new Map();      // draftId -> { id, to, text, createdAt, status }
+    this.drafts = new Map();      // draftId -> { id, to, text, createdAt, status, attachment? }
     this._draftSeq = 1;
     this._dirty = false;
     this._load();
@@ -115,9 +121,22 @@ class Store {
     return results;
   }
 
-  createDraft(to, text) {
+  // Saves attachment bytes under data/attachments/ and returns the file path.
+  // The stored name is prefixed with a random id so two files with the same
+  // name never collide; `safeName` must already be stripped of any path.
+  saveAttachment(safeName, buffer) {
+    ensureAttachmentsDir();
+    const stored = `${Date.now()}-${randomBytes(4).toString('hex')}-${safeName}`;
+    const filePath = path.join(ATTACHMENTS_DIR, stored);
+    fs.writeFileSync(filePath, buffer);
+    return filePath;
+  }
+
+  // `attachment` is optional: { fileName, mimetype, path, size }.
+  createDraft(to, text, attachment = null) {
     const id = `d${this._draftSeq++}`;
     const draft = { id, to, text, createdAt: Date.now(), status: 'pending' };
+    if (attachment) draft.attachment = attachment;
     this.drafts.set(id, draft);
     this.markDirty();
     this._save();
